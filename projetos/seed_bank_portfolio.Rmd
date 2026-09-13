@@ -1,0 +1,288 @@
+---
+title: "A Multi-Metric Analysis of Ecosystem Recovery"
+author: "Gabriela Albuquerque Galvão"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(ggplot2)
+library(vegan)
+library(ade4)
+library(FD)
+library(knitr)
+library(kableExtra)
+```
+### Packages
+
+- tidyverse  
+- ggplot2  
+- vegan  
+- ade4  
+- FD  
+- knitr  
+- kableExtra  
+
+
+---
+
+## Executive summary
+
+> **The core question:** Can a single metric tell the full story of a complex system, or does it hide what matters most?
+
+This project analyzes biodiversity data collected from areas impacted by the São Francisco River transposition project (Caatinga biome, Brazil). Using a **multi-metric analytical framework**, I demonstrate that surface-level indicators can be misleading, that is: a finding directly applicable to any domain where data-driven decisions depend on choosing the right KPI.
+
+**Stack:** R · tidyverse · ggplot2 · vegan · FD · multivariate statistics · mixed models
+
+**Key result:** Taxonomic richness showed *no significant difference* between groups. Functional diversity revealed *highly significant differences* (p < 0.01). Same data. Different question. Different answer.
+
+---
+
+## 1. The Problem
+
+Environmental restoration projects, like business interventions, require monitoring tools to evaluate their effectiveness. But which metric do you trust?
+
+This dataset covers **four distinct landscape conditions**, analogous to experimental groups in an A/B test:
+
+| Group | Description |
+|---|---|
+| **Control** | Non-impacted reference areas |
+| **Degraded** | Impacted areas of São Francisco river transposition |
+| **Restoration 1** | Direct seeding technique |
+| **Restoration 2** | Combined restoration techniques |
+
+The goal: determine whether restoration is working, but also and *how* to measure "working" in an ecology context.
+
+---
+
+## 2. Data
+
+```{r echo=TRUE}
+dataset_cmm <- read.csv("comunidade.csv",
+                       sep = ";",
+                       row.names = 1)
+kable(head(dataset_cmm[, 1:10]), caption = "Community matrix (first 10 columns shown)") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+
+traits <- read.csv("traits.csv",
+                   sep = ";",
+                   row.names = 1,
+                   fileEncoding = "Latin1")
+kable(head(traits), caption = "Species trait matrix") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+
+# Species abundance matrix
+cmm_table <- dataset_cmm %>%
+  dplyr::select(21:126)
+
+# Treatment groups
+treatments <- dataset_cmm %>%
+  dplyr::pull(Grupo)
+```
+
+**Dataset dimensions:** `r nrow(cmm_table)` sampling units × `r ncol(cmm_table)` species, plus `r ncol(traits)` functional trait variables per species.
+
+---
+
+## 3. Data Preparation & Feature Engineering
+
+Standardization is essential before multivariate analysis. Here I apply the **Hellinger transformation**, it down-weights highly abundant species and normalizes sampling effort, making samples comparable regardless of total seed counts.
+
+> *Business analogy: this may be equivalent to normalizing revenue by market size before comparing regions.*
+
+```{r echo=TRUE}
+# Hellinger transformation
+cmm_hell <- vegan::decostand(cmm_table, method = "hellinger")
+
+# Feature 1: taxonomic richness (species count per sample)
+richness <- rowSums(cmm_table > 0)
+
+dados <- data.frame(
+  richness = richness,
+  group = treatments
+) %>%
+  mutate(
+    group = case_when(
+      group == "N"   ~ "Degraded",
+      group == "P"   ~ "Control",
+      group == "RE1" ~ "Restoration 1",
+      group == "RE2" ~ "Restoration 2"
+    ),
+    group = factor(group, levels = c("Control", "Degraded", "Restoration 1", "Restoration 2"))
+  )
+```
+
+---
+
+## 4. Metric 1: Taxonomic richness (the obvious KPI)
+
+The first and most intuitive metric: how many species are present in each condition?
+
+```{r echo=TRUE}
+ggplot(dados, aes(x = group, y = richness, fill = group)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA, color = "black") +
+  geom_jitter(width = 0.12, alpha = 0.5, size = 2) +
+  stat_summary(fun = mean, geom = "point", size = 3, color = "black") +
+  scale_fill_manual(values = c(
+    "Control"       = "#33a02c",
+    "Degraded"      = "#ca0020",
+    "Restoration 1" = "#1f78b4",
+    "Restoration 2" = "#6A5ACD"
+  )) +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Species Richness by Landscape Condition",
+    subtitle = "Points = individual samples | Black dot = group mean",
+    x = NULL, y = "Number of Species"
+  ) +
+  theme(legend.position = "none", plot.title = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 20, hjust = 1))
+```
+
+```{r echo=TRUE}
+anova_richness <- aov(richness ~ group, data = dados)
+shapiro.test(residuals(anova_richness))
+bartlett.test(richness ~ group, data = dados)
+summary(anova_richness)
+```
+
+**Result:** ANOVA assumptions met. No statistically significant difference detected (p > 0.05)
+
+**Interpretation:** If this were the only metric in a dashboard, the conclusion would be: *"Restoration has no effect."*. But that conclusion would be wrong.
+
+---
+
+## 5. Metric 2 — Functional diversity (The better KPI)
+
+Species richness counts *how many*. Functional diversity measures *what kind*, capturing the range of ecological roles present in each community.
+
+**FDis (Functional Dispersion):** measures how spread species are in trait space. Higher FDis = more functionally diverse community = more resistent ecosystem.
+
+> *Business analogy: the difference between counting the number of employees vs. measuring the diversity of skills on a team.*
+
+```{r echo=TRUE}
+traits_num <- traits %>%
+  mutate(h_max = as.numeric(as.character(h_max))) %>%
+  select(h_max) %>%
+  drop_na()
+
+common_species <- intersect(rownames(traits_num), colnames(cmm_table))
+traits_num    <- traits_num[common_species, , drop = FALSE]
+cmm_aligned   <- cmm_table[, common_species]
+cmm_hell      <- vegan::decostand(cmm_aligned, method = "hellinger")
+traits_num    <- traits_num[colnames(cmm_hell), , drop = FALSE]
+
+fdis      <- FD::dbFD(traits_num, cmm_hell)$FDis
+dados$fdis <- fdis
+
+ggplot(dados, aes(x = group, y = fdis, fill = group)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA, color = "black") +
+  geom_jitter(width = 0.12, alpha = 0.5, size = 2) +
+  stat_summary(fun = mean, geom = "point", size = 3, color = "black") +
+  scale_fill_manual(values = c(
+    "Control"       = "#33a02c",
+    "Degraded"      = "#ca0020",
+    "Restoration 1" = "#1f78b4",
+    "Restoration 2" = "#6A5ACD"
+  )) +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Functional diversity (FDis) by landscape condition",
+    subtitle = "FDis captures the 'profile diversity' of the community: not just its size",
+    x = NULL, y = "Functional dispersion (FDis)"
+  ) +
+  theme(legend.position = "none", plot.title = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 20, hjust = 1))
+
+anova_fdis <- aov(fdis ~ group, data = dados)
+shapiro.test(residuals(anova_fdis))
+bartlett.test(richness ~ group, data = dados)
+summary(anova_fdis)
+```
+
+**Result:** Significant differences detected (p < 0.01).
+
+**Interpretation:** Restoration *is* working, but only a deeper metric can see it.
+
+---
+
+## 6. Metric 3 — Community Composition (Structural Analysis)
+
+PCoA (Principal Coordinates Analysis) is a dimensionality reduction technique, analogous to PCA, that maps community similarity in 2D space. Points closer together = more similar composition.
+
+```{r echo=TRUE}
+dist_matrix <- vegdist(cmm_hell, method = "bray")
+pcoa        <- cmdscale(dist_matrix, k = 2)
+
+df_pcoa <- data.frame(
+  Axis1 = pcoa[, 1],
+  Axis2 = pcoa[, 2],
+  group = dados$group
+)
+
+ggplot(df_pcoa, aes(Axis1, Axis2, color = group)) +
+  geom_point(size = 3.5, alpha = 0.85) +
+  stat_ellipse(aes(fill = group), geom = "polygon", alpha = 0.08, linetype = 2) +
+  scale_color_manual(values = c(
+    "Control"       = "#33a02c",
+    "Degraded"      = "#ca0020",
+    "Restoration 1" = "#1f78b4",
+    "Restoration 2" = "#6A5ACD"
+  )) +
+  scale_fill_manual(values = c(
+    "Control"       = "#33a02c",
+    "Degraded"      = "#ca0020",
+    "Restoration 1" = "#1f78b4",
+    "Restoration 2" = "#6A5ACD"
+  )) +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Community Composition Space (PCoA)",
+    subtitle = "Separation between groups = structural differences invisible to richness",
+    x = "Principal Coordinate 1", y = "Principal Coordinate 2",
+    color = NULL, fill = NULL
+  ) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+**Interpretation:** Even when counts look similar, communities can occupy completely different positions in composition space — different species, different functional roles, different ecological dynamics.
+
+---
+
+## 7. Insights & Takeaways
+
+### Finding 1 - The wrong KPI gives the wrong answer
+
+| Metric | Result | Conclusion |
+|---|---|---|
+| Species Richness | p > 0.05, ns | "No effect of restoration" ❌ |
+| Functional Diversity | p < 0.01 ** | "Restoration works" ✅ |
+| Composition (PCoA) | Visual separation | "Groups are structurally different" ✅ |
+
+> **Data lesson:** A dashboard showing "no change" in a top-line metric may be hiding significant structural shifts. Always interrogate *what* you're measuring, not just *whether* it changed.
+
+
+### Finding 2 - Structure ≠ Volume
+
+Two groups can have the same number of items (species, customers, transactions) while being entirely different in *composition*. Multivariate methods reveal this. Aggregate counts don't.
+
+> **Data lesson:** Segment-level structure analysis (clustering, PCA, PCoA) catches what KPI dashboards miss.
+
+---
+
+## Skills Demonstrated  
+*(AI generated based on the script)*
+
+| Skill                     | Applied as                                                                 |
+|--------------------------|---------------------------------------------------------------------------|
+| Data wrangling           | tidyverse pipelines, matrix alignment, missing data handling              |
+| Feature engineering      | Hellinger transformation, functional metrics (FDis)                       |
+| Statistical testing      | ANOVA with assumption checking (Shapiro, Bartlett)                        |
+| Dimensionality reduction | PCoA / cmdscale on Bray-Curtis dissimilarity matrix                       |
+| Data visualization       | ggplot2 with layered geometries, ellipses, color encoding                 |
+| Critical interpretation  | Multi-metric framework, translating results to decisions                  |
+---
+
+*Gabriela Albuquerque Galvão · ggalvao96@gmail.com · Recife, PE*
